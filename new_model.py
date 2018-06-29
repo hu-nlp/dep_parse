@@ -5,13 +5,14 @@ from keras.models import Sequential, load_model
 from keras.layers import Dense, Layer, RepeatVector, Masking, Concatenate, Add, Reshape, Activation, Dropout, LSTM, TimeDistributed, Bidirectional, Embedding, Input
 from keras.utils import plot_model
 import keras.backend as K
+from keras.optimizers import Adam
 
 class BiLSTM(Layer):
 
     def __init__(self, output_dim, **kwargs):
         self.output_dim = output_dim
-        self.f_lstm = LSTM(output_dim, dropout=0.35, recurrent_dropout=0.1, return_sequences=True)
-        self.b_lstm = LSTM(output_dim, dropout=0.35, recurrent_dropout=0.1, return_sequences=True)
+        self.f_lstm = LSTM(output_dim, dropout=0.35, recurrent_dropout=0.1, return_sequences=False)
+        self.b_lstm = LSTM(output_dim, dropout=0.35, recurrent_dropout=0.1, return_sequences=False)
         self.bilstm = Concatenate()
         super(BiLSTM, self).__init__(**kwargs)
 
@@ -33,8 +34,6 @@ class DependencyParser(object):
 
     def __create_xy(self, dependency_tree, embedding_file, data_size, look_back, test=False):
         sentences, words, tags = DataUtils.parse_dependency_tree(dependency_tree)
-        word_vectors = DataUtils.create_onehot_vectors(words)
-        #word_int = DataUtils.create_int_dict(words)
         word_emb = DataUtils.load_embeddings(embedding_file)
         tag_int = DataUtils.create_int_dict(tags)
 
@@ -135,40 +134,28 @@ class DependencyParser(object):
             DataUtils.update_message(str(progress)+"/"+str(data_size))
             progress += 1
 
-        word_data = [(word_input_forward, word_input_backward), (word_head_forward, word_head_backward)]
-        tag_data = [(tag_input_forward, tag_input_backward), (tag_head_forward, tag_head_backward)]
+        word_data = [word_input_forward, word_input_backward, word_head_forward, word_head_backward]
+        tag_data = [tag_input_forward, tag_input_backward, tag_head_forward, tag_head_backward]
 
-        return word_data, tag_data, probability
+        return [word_data[0], word_data[1], tag_data[0], tag_data[1], word_data[2], word_data[3], tag_data[2], tag_data[3]], probability
 
     def create_xy_test(self, dependency_tree, embedding_file, data_size=1, look_back=0, mode="create", load=None):
         DataUtils.message("Prepearing Test Data...", new=True)
 
         if mode == "create" or mode == "save":
-            word_test, head_test, tag_test = self.__create_xy(dependency_tree, embedding_file, data_size, look_back, test=True)
+            test_x, test_y = self.__create_xy(dependency_tree, embedding_file, data_size, look_back, test=True)
 
-        if mode == "save":
-            DataUtils.save_array(DataUtils.get_filename("DP_W","TEST"+"_"+str(look_back)), word_test)
-            DataUtils.save_array(DataUtils.get_filename("DP_H","TEST"+"_"+str(look_back)), head_test)
-            DataUtils.save_array(DataUtils.get_filename("DP_T","TEST"+"_"+str(look_back)), tag_test)
-
-        if mode == "load" and load is not None:
-            word_test = DataUtils.load_array(load[0])
-            head_test = DataUtils.load_array(load[1])
-            tag_test = DataUtils.load_array(load[2])
-
-        self.word_test = np.array(word_test)
-        self.head_test = np.array(head_test)
-        self.tag_test = np.array(tag_test)
+        self.test_x = test_x
+        self.test_y = test_y
 
     def create_xy_train(self, dependency_tree, embedding_file, data_size=1, look_back=0, mode="create", load=None):
         DataUtils.message("Prepearing Training Data...", new=True)
 
         if mode == "create" or mode == "save":
-            word_train, tag_train, probability_train = self.__create_xy(dependency_tree, embedding_file, data_size, look_back, test=False)
+            train_x, train_y = self.__create_xy(dependency_tree, embedding_file, data_size, look_back, test=False)
 
-        self.word_train = word_train
-        self.tag_train = tag_train
-        self.probability_train = probability_train
+        self.train_x = train_x
+        self.train_y = train_y
 
     def save(self, note=""):
         DataUtils.message("Saving Model...", new=True)
@@ -221,12 +208,15 @@ class DependencyParser(object):
         head_forward = Concatenate()([word_head_forward, tag_head_forward_output])
         head_backward = Concatenate()([word_head_backward, tag_head_backward_output])
 
+        f_lstm = LSTM(300, dropout=0.35, recurrent_dropout=0.1, return_sequences=False)
+        b_lstm = LSTM(300, dropout=0.35, recurrent_dropout=0.1, return_sequences=False)
+
         bilstm = BiLSTM(300)
 
-        bilstm_input = bilstm([input_forward,input_backward])
+        bilstm_input = bilstm([input_forward, input_backward])
         dense_input = Dense(600, activation="linear")(bilstm_input)
 
-        bilstm_head = bilstm([head_forward,head_backward])
+        bilstm_head = bilstm([head_forward, head_backward])
         dense_head = Dense(600, activation="linear")(bilstm_head)
 
         sum_dense = Add()([dense_input,dense_head])
@@ -240,11 +230,11 @@ class DependencyParser(object):
 
     def train(self, epochs, batch_size=32):
         DataUtils.message("Training...", new=True)
-        a = self.model.fit([self.word_train[0][0], self.word_train[0][1], self.tag_train[0][0], self.tag_train[0][1], self.word_train[1][0], self.word_train[1][1], self.tag_train[1][0], self.tag_train[1][1]], self.probability_train, epochs=epochs, batch_size=batch_size)
-        print(a.history)
+        self.model.fit(self.train_x, self.train_y, epochs=epochs, batch_size=batch_size)
+
     def validate(self, batch_size=16):
         DataUtils.message("Validation...")
-        return self.model.evaluate([self.word_test,self.tag_test], self.head_test, batch_size=batch_size)
+        return self.model.evaluate(self.test_x, self.test_y, batch_size=batch_size)
 
     def predict(self, x):
         return self.model.predict(x)
@@ -255,11 +245,13 @@ class DependencyParser(object):
 if __name__ == "__main__":
     train_file = "data/penn-treebank.conllx"
     embedding_file = "embeddings/GoogleNews-vectors-negative300-SLIM.bin"
-    epochs = 0
+    epochs = 10
     look_back = 100 #0 means the largest window
 
     model = DependencyParser()
-    model.create_xy_train(train_file, embedding_file, 0.001, look_back = look_back)
+    model.create_xy_train(train_file, embedding_file, 0.1, look_back = look_back)
+    model.create_xy_test(train_file, embedding_file, 0.01, look_back = look_back)
     model.create()
-    model.summary()
     model.train(epochs)
+
+    DataUtils.message(model.validate())
